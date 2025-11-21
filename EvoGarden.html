@@ -1,0 +1,894 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Acquario Evolutivo Genetico</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #0f172a; color: white; font-family: 'Segoe UI', sans-serif; }
+        canvas { display: block; }
+        
+        /* UI Overlay */
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
+        .interactive { pointer-events: auto; }
+        
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: #1e293b; }
+        ::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
+        
+        .glass-panel {
+            background: rgba(30, 41, 59, 0.90);
+            backdrop-filter: blur(8px);
+            border: 1px solid rgba(255,255,255,0.1);
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.5);
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Canvas di simulazione -->
+    <canvas id="simCanvas"></canvas>
+
+    <!-- UI Layer -->
+    <div id="ui-layer" class="flex flex-col justify-between p-4">
+        <!-- Top Stats -->
+        <div class="flex justify-between items-start w-full">
+            <div class="glass-panel p-3 rounded-lg text-sm text-slate-300 interactive">
+                <h1 class="text-lg font-bold text-cyan-400 mb-1">EvoGarden v1.9 (Full Collision)</h1>
+                <div class="grid grid-cols-2 gap-x-4">
+                    <p>Prede: <span id="count-prey" class="text-emerald-400 font-mono">0</span></p>
+                    <p>Predatori: <span id="count-predator" class="text-rose-400 font-mono">0</span></p>
+                    <p>Cibo: <span id="count-food" class="text-white font-mono">0</span></p>
+                </div>
+                <p class="mt-2 text-xs text-slate-500">Comandi:</p>
+                <ul class="list-disc list-inside text-xs">
+                    <li><kbd class="bg-slate-700 px-1 rounded">P</kbd> Pausa/Riprendi</li>
+                    <li><kbd class="bg-slate-700 px-1 rounded">L</kbd> Log Globale</li>
+                    <li><kbd class="bg-slate-700 px-1 rounded">I</kbd> Info Creatura</li>
+                    <li><kbd class="bg-slate-700 px-1 rounded">Click</kbd> Seleziona</li>
+                </ul>
+            </div>
+
+            <!-- Pausa Indicator -->
+            <div id="pause-indicator" class="hidden glass-panel px-6 py-2 rounded-full text-yellow-400 font-bold text-xl tracking-widest animate-pulse mx-auto">
+                PAUSA
+            </div>
+            
+            <!-- Spacer per bilanciare layout -->
+            <div class="w-40"></div>
+        </div>
+
+        <!-- Global Log Panel (Left) -->
+        <div id="log-panel" class="hidden absolute top-32 left-4 w-80 max-h-[60vh] overflow-y-auto glass-panel rounded-lg p-4 interactive flex flex-col gap-2 transition-all duration-300 z-10">
+            <div class="flex justify-between items-center border-b border-slate-600 pb-2 sticky top-0 bg-slate-800/50 backdrop-blur-sm">
+                <h2 class="text-lg font-bold text-blue-400">Log Ecosistema</h2>
+                <span class="text-xs text-slate-500">Eventi Totali: <span id="log-count">0</span></span>
+            </div>
+            <ul id="global-log-list" class="text-xs font-mono space-y-1 text-slate-400">
+                <!-- Global Logs go here -->
+            </ul>
+        </div>
+
+        <!-- Info Panel (Right) -->
+        <div id="info-panel" class="hidden absolute top-32 right-4 w-80 max-h-[60vh] overflow-y-auto glass-panel rounded-lg p-4 interactive flex flex-col gap-3 transition-all duration-300 z-10">
+            <div class="flex justify-between items-center border-b border-slate-600 pb-2">
+                <h2 class="text-xl font-bold text-emerald-400">Dati Creatura</h2>
+                <span class="text-xs text-slate-400">ID: <span id="info-id">---</span></span>
+            </div>
+            
+            <div id="info-content" class="space-y-3">
+                <div class="text-center text-slate-500 italic py-4">Nessuna creatura selezionata</div>
+            </div>
+            
+            <div class="mt-2 border-t border-slate-600 pt-2">
+                <h3 class="text-sm font-semibold text-slate-300 mb-2">Storia Completa</h3>
+                <ul id="info-log" class="text-xs font-mono space-y-1 text-slate-400">
+                    <!-- Creature Logs go here -->
+                </ul>
+            </div>
+        </div>
+    </div>
+
+<script>
+/**
+ * CONFIGURAZIONE
+ */
+const CONFIG = {
+    initialPop: 60,     
+    targetPop: 50,      
+    predatorRatio: 0.18,
+    maxPredatorRatio: 0.25, 
+    foodRate: 1.8,      
+    maxFood: 350,
+    mutationRate: 0.1,
+    baseSize: 5,         
+    sizeGrowthFactor: 0.01,
+    
+    // Stamina & Bilanciamento
+    staminaDrainSprint: 0.5,
+    staminaDrainBase: 0.03,
+    staminaRecoveryRest: 1.2,
+    exhaustionThreshold: 10,
+    recoveryThreshold: 130,
+    sprintMultiplier: 2.1,
+
+    // Vecchiaia
+    lifespanPrey: 25000,
+    lifespanPredator: 13000
+};
+
+const TYPES = { CERCHIO: 0, SERPENTE: 1, FLAGELLO: 2 };
+const ROLES = { PREDA: 'prey', PREDATORE: 'predator' };
+const STATES = { VAGARE: 'vagare', CACCIA: 'caccia', FUGA: 'fuga', ESAUSTO: 'esausto' };
+
+/**
+ * UTILITÀ
+ */
+const utils = {
+    random: (min, max) => Math.random() * (max - min) + min,
+    randomInt: (min, max) => Math.floor(Math.random() * (max - min + 1) + min),
+    dist: (x1, y1, x2, y2) => Math.hypot(x2 - x1, y2 - y1),
+    hslToHex: (h, s, l) => {
+        l /= 100;
+        const a = s * Math.min(l, 1 - l) / 100;
+        const f = n => {
+            const k = (n + h / 30) % 12;
+            const color = l - a * Math.max(Math.min(k - 3, 9 - k, 1), -1);
+            return Math.round(255 * color).toString(16).padStart(2, '0');
+        };
+        return `#${f(0)}${f(8)}${f(4)}`;
+    }
+};
+
+/**
+ * CLASSE CIBO
+ */
+class Food {
+    constructor(w, h) {
+        this.x = utils.random(10, w - 10);
+        this.y = utils.random(10, h - 10);
+        this.size = utils.random(2, 3);
+        this.energy = this.size * 8;
+        this.color = '#4ade80'; 
+        this.driftX = utils.random(-0.2, 0.2);
+        this.driftY = utils.random(-0.2, 0.2);
+    }
+
+    update(bounds) {
+        this.x += this.driftX;
+        this.y += this.driftY;
+        if(this.x < 0) this.x = bounds.width;
+        if(this.x > bounds.width) this.x = 0;
+        if(this.y < 0) this.y = bounds.height;
+        if(this.y > bounds.height) this.y = 0;
+    }
+
+    draw(ctx) {
+        ctx.globalAlpha = 0.6;
+        ctx.fillStyle = this.color;
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1.0;
+    }
+}
+
+/**
+ * CLASSE CREATURA
+ */
+class Creature {
+    constructor(x, y, id, birthTime, parents = null, forcedRole = null) {
+        this.id = id;
+        this.x = x;
+        this.y = y;
+        this.birthFrame = birthTime;
+        this.vx = utils.random(-1, 1);
+        this.vy = utils.random(-1, 1);
+        this.rotationAngle = 0;
+        this.age = 0;
+        this.history = []; 
+        this.generation = parents ? parents.gen + 1 : 1;
+        this.state = STATES.VAGARE;
+
+        // GENETICA
+        if (parents) {
+            this.genes = { ...parents.genes };
+            if (Math.random() < CONFIG.mutationRate) {
+                this.genes.metabolism += utils.random(-0.1, 0.1);
+                this.genes.hue += utils.randomInt(-20, 20);
+                if(Math.random() < 0.05) this.genes.speciesVariant = utils.randomInt(1, 5);
+            }
+        } else {
+            const types = [TYPES.CERCHIO, TYPES.SERPENTE, TYPES.FLAGELLO];
+            let role;
+            if (forcedRole) {
+                role = forcedRole;
+            } else {
+                role = Math.random() < CONFIG.predatorRatio ? ROLES.PREDATORE : ROLES.PREDA;
+            }
+            
+            this.genes = {
+                type: types[utils.randomInt(0, 2)],
+                role: role,
+                metabolism: utils.random(0.8, 1.2),
+                hue: role === ROLES.PREDATORE ? 0 : utils.randomInt(60, 300),
+                baseStamina: utils.randomInt(20, 40),
+                speciesVariant: utils.randomInt(1, 5) 
+            };
+        }
+
+        const baseLifespan = this.genes.role === ROLES.PREDATORE ? CONFIG.lifespanPredator : CONFIG.lifespanPrey;
+        this.maxAge = baseLifespan * utils.random(0.8, 1.2);
+
+        if (this.genes.role === ROLES.PREDATORE) {
+            this.weight = utils.random(3.5, 6.0);
+            this.stamina = 120;
+            this.maxStamina = 120;
+        } else {
+            this.weight = utils.random(2.0, 4.5);
+            this.stamina = 100; 
+            this.maxStamina = 100;
+        }
+        
+        this.initSegments();
+        this.recordEvent(`Nato: ${this.genes.role === ROLES.PREDATORE ? 'Predatore' : 'Preda'}`);
+    }
+
+    initSegments() {
+        this.segments = [];
+        let segCount = 0;
+        if (this.genes.type === TYPES.SERPENTE) segCount = 8;
+        if (this.genes.type === TYPES.FLAGELLO) segCount = 12;
+        for (let i = 0; i < segCount; i++) this.segments.push({ x: this.x, y: this.y });
+    }
+
+    get radius() {
+        return CONFIG.baseSize * (1 + (this.weight * CONFIG.sizeGrowthFactor));
+    }
+
+    get maxSpeed() {
+        let baseFactor = this.genes.role === ROLES.PREDATORE ? 4.0 : 3.5;
+        let spd = baseFactor / (this.weight * 0.25 + 1);
+        if (this.state === STATES.CACCIA || this.state === STATES.FUGA) spd *= CONFIG.sprintMultiplier;
+        if (this.state === STATES.ESAUSTO) spd = 0; 
+        return spd;
+    }
+
+    update(foodList, creatureList, bounds) {
+        this.age++;
+        if (this.age > this.maxAge) return "OLD_AGE"; 
+
+        let staminaCost = CONFIG.staminaDrainBase * this.genes.metabolism;
+        if (this.state === STATES.CACCIA || this.state === STATES.FUGA) staminaCost = CONFIG.staminaDrainSprint;
+
+        if (this.state === STATES.ESAUSTO) {
+            this.stamina += CONFIG.staminaRecoveryRest;
+            if (this.stamina >= CONFIG.recoveryThreshold) {
+                this.state = STATES.VAGARE; 
+                this.recordEvent("Recuperato");
+            }
+            staminaCost = 0; 
+        } else {
+            this.stamina -= staminaCost;
+            if (this.stamina <= CONFIG.exhaustionThreshold) {
+                this.state = STATES.ESAUSTO;
+                this.recordEvent("ESAUSTO! Stop.");
+            }
+        }
+
+        let hungerRate = 0.05;
+        if (this.genes.role === ROLES.PREDATORE) hungerRate = 0.03;
+        if (this.age % 60 === 0) this.weight -= hungerRate * this.genes.metabolism;
+
+        // AI & MOVIMENTO
+        let accX = 0, accY = 0;
+        let targetFound = false;
+
+        if (this.state !== STATES.ESAUSTO) {
+            let viewRadius = 280; 
+            if (this.genes.role === ROLES.PREDATORE) {
+                let closestPrey = null;
+                let minDist = Infinity;
+                for(let c of creatureList) {
+                    if (c === this || c.genes.role === ROLES.PREDATORE) continue; 
+                    let d = utils.dist(this.x, this.y, c.x, c.y);
+                    if (d < viewRadius && d < minDist) {
+                        if (this.weight > c.weight * 0.85) { 
+                            minDist = d;
+                            closestPrey = c;
+                        }
+                    }
+                }
+                if (closestPrey) {
+                    this.state = STATES.CACCIA;
+                    targetFound = true;
+                    let dx = closestPrey.x - this.x;
+                    let dy = closestPrey.y - this.y;
+                    let dist = Math.hypot(dx, dy);
+                    dx /= dist; dy /= dist;
+                    let speedReq = this.maxSpeed;
+                    if (dist < 10) speedReq *= (dist / 10); 
+                    accX = (dx * speedReq) - this.vx;
+                    accY = (dy * speedReq) - this.vy;
+                } else {
+                    if (this.state === STATES.CACCIA) this.state = STATES.VAGARE;
+                }
+            } else {
+                let closestThreat = null;
+                let minThreatDist = Infinity;
+                for(let c of creatureList) {
+                    if (c.genes.role === ROLES.PREDATORE) {
+                        let d = utils.dist(this.x, this.y, c.x, c.y);
+                        if (d < viewRadius && d < minThreatDist) {
+                            minThreatDist = d;
+                            closestThreat = c;
+                        }
+                    }
+                }
+                if (closestThreat) {
+                    this.state = STATES.FUGA;
+                    targetFound = true;
+                    let dx = this.x - closestThreat.x;
+                    let dy = this.y - closestThreat.y;
+                    let dist = Math.hypot(dx, dy);
+                    dx /= dist; dy /= dist;
+                    accX = dx * 2; 
+                    accY = dy * 2;
+                } else {
+                    if (this.state === STATES.FUGA) this.state = STATES.VAGARE;
+                    let closestFood = null;
+                    let minDistFood = Infinity;
+                    for(let f of foodList) {
+                        let d = utils.dist(this.x, this.y, f.x, f.y);
+                        if (d < viewRadius && d < minDistFood) {
+                            minDistFood = d;
+                            closestFood = f;
+                        }
+                    }
+                    if (closestFood) {
+                        let dx = closestFood.x - this.x;
+                        let dy = closestFood.y - this.y;
+                        let dist = Math.hypot(dx, dy);
+                        dx /= dist; dy /= dist;
+                        let speedReq = this.maxSpeed;
+                        if (dist < 30) speedReq *= (dist/30); 
+                        accX = (dx * speedReq) - this.vx;
+                        accY = (dy * speedReq) - this.vy;
+                    }
+                }
+            }
+
+            if (!targetFound) {
+                accX += utils.random(-0.3, 0.3);
+                accY += utils.random(-0.3, 0.3);
+            }
+
+            this.vx += accX;
+            this.vy += accY;
+
+            const currSpeed = Math.hypot(this.vx, this.vy);
+            const limit = this.maxSpeed;
+            if (currSpeed > limit) {
+                if (limit === 0) {
+                    this.vx = 0; this.vy = 0;
+                } else {
+                    this.vx = (this.vx / currSpeed) * limit;
+                    this.vy = (this.vy / currSpeed) * limit;
+                }
+            }
+        } else {
+            this.vx *= 0.9;
+            this.vy *= 0.9;
+        }
+
+        this.x += this.vx;
+        this.y += this.vy;
+
+        if (Math.hypot(this.vx, this.vy) > 0.1) {
+            this.rotationAngle = Math.atan2(this.vy, this.vx);
+        }
+
+        // Soft boundaries: rallentano vicino ai bordi
+        const margin = 20;
+        if (this.x < margin) this.vx += 0.5;
+        if (this.x > bounds.width - margin) this.vx -= 0.5;
+        if (this.y < margin) this.vy += 0.5;
+        if (this.y > bounds.height - margin) this.vy -= 0.5;
+
+        // Hard clamp: impedisce di uscire dallo schermo
+        const padding = this.radius + 5;
+        this.x = Math.max(padding, Math.min(bounds.width - padding, this.x));
+        this.y = Math.max(padding, Math.min(bounds.height - padding, this.y));
+
+        this.updateSegments();
+        return "ALIVE"; 
+    }
+
+    updateSegments() {
+        if (this.segments.length === 0) return;
+        let leaderX = this.x;
+        let leaderY = this.y;
+        let spacing = this.radius * 0.8; 
+        for (let i = 0; i < this.segments.length; i++) {
+            let seg = this.segments[i];
+            let dx = leaderX - seg.x;
+            let dy = leaderY - seg.y;
+            let d = Math.hypot(dx, dy);
+            let angle = Math.atan2(dy, dx);
+            if (d > spacing) {
+                seg.x = leaderX - Math.cos(angle) * spacing;
+                seg.y = leaderY - Math.sin(angle) * spacing;
+            }
+            leaderX = seg.x;
+            leaderY = seg.y;
+        }
+    }
+
+    eat(amount) {
+        this.weight += 0.3;
+        this.stamina = Math.min(this.maxStamina, this.stamina + amount);
+    }
+
+    eatPrey(prey) {
+        if (this.genes.role !== ROLES.PREDATORE) return;
+        this.weight += prey.weight * 0.6; 
+        this.stamina = this.maxStamina;
+        this.recordEvent(`Mangiato ${prey.id}`);
+    }
+
+    recordEvent(msg) {
+        const eventFrame = this.birthFrame + this.age;
+        const time = Math.floor(eventFrame / 60);
+        this.history.unshift(`[${time}s] ${msg}`);
+    }
+
+    // --- DISEGNO ---
+    draw(ctx, isSelected) {
+        ctx.save();
+        
+        let color;
+        if (this.genes.role === ROLES.PREDATORE) {
+            color = `hsl(${this.genes.hue || 0}, 80%, 50%)`;
+        } else {
+            color = `hsl(${this.genes.hue}, 70%, 50%)`;
+        }
+
+        if (this.state === STATES.ESAUSTO) ctx.globalAlpha = 0.5;
+
+        ctx.fillStyle = color;
+        ctx.strokeStyle = isSelected ? '#ffffff' : 'rgba(0,0,0,0.3)';
+        ctx.lineWidth = isSelected ? 2 : 1;
+
+        const r = this.radius;
+
+        if (this.genes.type === TYPES.CERCHIO) this.drawCerchio(ctx, r, color);
+        else if (this.genes.type === TYPES.SERPENTE) this.drawSerpente(ctx, r, color);
+        else if (this.genes.type === TYPES.FLAGELLO) this.drawFlagello(ctx, r, color);
+
+        // Stato Icona
+        if (this.state === STATES.ESAUSTO) {
+            ctx.fillStyle = 'white';
+            ctx.font = '10px Arial';
+            ctx.fillText('zzz', this.x - 5, this.y - r - 5);
+        } else if (this.state === STATES.CACCIA) {
+            ctx.fillStyle = 'red';
+            ctx.beginPath(); ctx.arc(this.x, this.y - r - 8, 3, 0, Math.PI*2); ctx.fill();
+        } else if (this.state === STATES.FUGA) {
+            ctx.fillStyle = 'yellow';
+            ctx.fillText('!', this.x - 2, this.y - r - 5);
+        }
+
+        if (isSelected) {
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, r + 10, 0, Math.PI*2);
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+            ctx.stroke();
+        }
+        ctx.restore();
+    }
+
+    drawCerchio(ctx, size, color) {
+        const isPred = this.genes.role === ROLES.PREDATORE;
+        ctx.save();
+        ctx.translate(this.x, this.y);
+        ctx.rotate(this.rotationAngle);
+
+        ctx.beginPath();
+        ctx.arc(0, 0, size, 0, Math.PI*2);
+        ctx.fillStyle = color;
+        ctx.fill();
+        if (isPred) {
+            ctx.beginPath(); ctx.arc(0, 0, size * 0.6, 0, Math.PI*2); ctx.fillStyle = '#1a1a1a'; ctx.fill();
+            ctx.beginPath(); ctx.arc(0, 0, size * 0.3, 0, Math.PI*2); ctx.fillStyle = color; ctx.fill();
+        }
+        
+        ctx.beginPath(); ctx.arc(-size*1.2, 0, size*0.5, 0, Math.PI*2); ctx.fillStyle = color; ctx.fill();
+        ctx.restore();
+    }
+
+    drawSerpente(ctx, size, color) {
+        const isPred = this.genes.role === ROLES.PREDATORE;
+        let currentSize = size * 0.9; 
+        this.segments.forEach((seg, index) => {
+            currentSize *= 0.95; 
+            ctx.beginPath(); ctx.arc(seg.x, seg.y, Math.max(1, currentSize), 0, Math.PI * 2);
+            if (isPred && index % 2 === 0) ctx.fillStyle = '#1a1a1a';
+            else ctx.fillStyle = color;
+            ctx.fill();
+        });
+        ctx.beginPath(); ctx.arc(this.x, this.y, size, 0, Math.PI * 2); 
+        ctx.fillStyle = color; ctx.fill();
+        this.drawEyes(ctx, size);
+    }
+
+    drawFlagello(ctx, size, color) {
+        const isPred = this.genes.role === ROLES.PREDATORE;
+        let currentSize = size * 0.6;
+        let leader = { x: this.x, y: this.y };
+
+        this.segments.forEach((seg, i) => {
+            let angleToLeader = Math.atan2(leader.y - seg.y, leader.x - seg.x);
+            if (isNaN(angleToLeader)) angleToLeader = 0;
+            let perpAngle = angleToLeader + Math.PI / 2;
+            let wobbleFactor = (i / this.segments.length) * size * 0.8;
+            let speed = Math.hypot(this.vx, this.vy);
+            let wobble = Math.sin(Date.now() * 0.01 * (speed+1) + i * 0.5) * wobbleFactor;
+            let drawX = seg.x + Math.cos(perpAngle) * wobble;
+            let drawY = seg.y + Math.sin(perpAngle) * wobble;
+
+            ctx.beginPath(); ctx.arc(drawX, drawY, Math.max(1, currentSize), 0, Math.PI * 2);
+            if (isPred && i % 2 !== 0) ctx.fillStyle = '#1a1a1a';
+            else ctx.fillStyle = color;
+            ctx.fill();
+            leader = seg; 
+        });
+        ctx.beginPath(); ctx.arc(this.x, this.y, size, 0, Math.PI * 2); 
+        ctx.fillStyle = color; ctx.fill();
+        this.drawEyes(ctx, size);
+    }
+
+    drawEyes(ctx, size) {
+        ctx.fillStyle = 'white';
+        let eyeOffset = size * 0.4; let eyeSize = size * 0.25;
+        let lex = this.x + Math.cos(this.rotationAngle - 0.5) * eyeOffset;
+        let ley = this.y + Math.sin(this.rotationAngle - 0.5) * eyeOffset;
+        let rex = this.x + Math.cos(this.rotationAngle + 0.5) * eyeOffset;
+        let rey = this.y + Math.sin(this.rotationAngle + 0.5) * eyeOffset;
+        ctx.beginPath(); ctx.arc(lex, ley, eyeSize, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(rex, rey, eyeSize, 0, Math.PI*2); ctx.fill();
+    }
+}
+
+/**
+ * MOTORE DI GIOCO
+ */
+class Game {
+    constructor() {
+        this.canvas = document.getElementById('simCanvas');
+        this.ctx = this.canvas.getContext('2d');
+        this.creatures = [];
+        this.food = [];
+        this.globalLogs = []; // Log Globale
+        this.paused = false;
+        this.selectedID = null;
+        this.idCounter = 0;
+        this.showInfo = false;
+        this.showGlobalLog = false;
+        this.time = 0;
+
+        this.resize();
+        window.addEventListener('resize', () => this.resize());
+
+        window.addEventListener('keydown', (e) => {
+            if (e.key.toLowerCase() === 'p') this.togglePause();
+            if (e.key.toLowerCase() === 'i') this.toggleInfo();
+            if (e.key.toLowerCase() === 'l') this.toggleGlobalLog();
+        });
+
+        this.canvas.addEventListener('mousedown', (e) => this.handleClick(e));
+
+        for(let i=0; i<CONFIG.initialPop; i++) {
+            this.addCreature();
+        }
+
+        this.loop = this.loop.bind(this);
+        requestAnimationFrame(this.loop);
+        
+        setInterval(() => this.updateUI(), 200);
+    }
+
+    resize() {
+        this.canvas.width = window.innerWidth;
+        this.canvas.height = window.innerHeight;
+    }
+
+    addCreature(forcedRole = null, origin = "Generazione Spontanea") {
+        this.idCounter++;
+        
+        let c = new Creature(
+            utils.random(50, this.canvas.width-50),
+            utils.random(50, this.canvas.height-50),
+            this.idCounter,
+            this.time, 
+            null,
+            forcedRole 
+        );
+        this.creatures.push(c);
+        this.addGlobalLog(`Nato #${c.id} (${c.genes.role}) - ${origin}`, "text-blue-300");
+    }
+
+    addGlobalLog(msg, colorClass = "text-slate-400") {
+        const timestamp = Math.floor(this.time / 60);
+        this.globalLogs.unshift({ time: timestamp, msg: msg, color: colorClass });
+        if(this.globalLogs.length > 100) this.globalLogs.pop(); 
+    }
+
+    togglePause() {
+        this.paused = !this.paused;
+        document.getElementById('pause-indicator').classList.toggle('hidden', !this.paused);
+    }
+
+    toggleInfo() {
+        this.showInfo = !this.showInfo;
+        document.getElementById('info-panel').classList.toggle('hidden', !this.showInfo);
+    }
+
+    toggleGlobalLog() {
+        this.showGlobalLog = !this.showGlobalLog;
+        document.getElementById('log-panel').classList.toggle('hidden', !this.showGlobalLog);
+    }
+
+    handleClick(e) {
+        const rect = this.canvas.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        let clicked = null;
+        for (let i = this.creatures.length - 1; i >= 0; i--) {
+            let c = this.creatures[i];
+            if (utils.dist(x, y, c.x, c.y) < c.radius + 10) {
+                clicked = c;
+                break;
+            }
+        }
+        if (clicked) {
+            this.selectedID = clicked.id;
+            if (!this.showInfo) this.toggleInfo();
+        } else {
+            this.selectedID = null;
+        }
+    }
+
+    updateUI() {
+        const preds = this.creatures.filter(c => c.genes.role === ROLES.PREDATORE).length;
+        const prey = this.creatures.length - preds;
+        
+        document.getElementById('count-prey').innerText = prey;
+        document.getElementById('count-predator').innerText = preds;
+        document.getElementById('count-food').innerText = this.food.length;
+
+        if(this.showGlobalLog) {
+            document.getElementById('log-count').innerText = this.globalLogs.length;
+            const logList = document.getElementById('global-log-list');
+            logList.innerHTML = this.globalLogs.map(l => 
+                `<li><span class="text-slate-600">[${l.time}s]</span> <span class="${l.color}">${l.msg}</span></li>`
+            ).join('');
+        }
+
+        if (this.showInfo && this.selectedID) {
+            const c = this.creatures.find(x => x.id === this.selectedID);
+            const container = document.getElementById('info-content');
+            const logContainer = document.getElementById('info-log');
+            const idSpan = document.getElementById('info-id');
+
+            if (c) {
+                idSpan.innerText = "#" + c.id;
+                const makeBar = (val, max, col) => `
+                    <div class="w-full bg-slate-700 h-2 rounded mt-1">
+                        <div class="h-full rounded ${col}" style="width: ${Math.min(100, (val/max)*100)}%"></div>
+                    </div>`;
+
+                let roleColor = c.genes.role === ROLES.PREDATORE ? 'text-rose-400' : 'text-emerald-400';
+                let stateColor = 'text-white';
+                if(c.state === STATES.CACCIA) stateColor = 'text-red-500 font-bold';
+                if(c.state === STATES.FUGA) stateColor = 'text-yellow-400 font-bold';
+                if(c.state === STATES.ESAUSTO) stateColor = 'text-slate-500 italic';
+
+                const agePerc = (c.age / c.maxAge) * 100;
+
+                container.innerHTML = `
+                    <div class="grid grid-cols-2 gap-2 text-xs text-slate-300">
+                        <div class="col-span-2 text-base font-bold ${roleColor} border-b border-slate-600 pb-1 mb-1">
+                            ${c.genes.role.toUpperCase()} <span class="text-xs font-normal text-slate-400 ml-2">Specie: ${c.genes.speciesVariant}</span>
+                        </div>
+                        
+                        <div>Stato: <span class="${stateColor}">${c.state.toUpperCase()}</span></div>
+                        <div>Gen: <span class="text-white">${c.generation}</span></div>
+
+                        <!-- GENETICA -->
+                        <div class="col-span-2 mt-2 border-t border-slate-700 pt-1 font-bold text-sky-500">GENETICA</div>
+                        <div>Metabolismo: <span class="text-white">${c.genes.metabolism.toFixed(2)}</span></div>
+                        <div>Stam. Base: <span class="text-white">${c.genes.baseStamina}</span></div>
+                        
+                        <!-- STATS FISICHE -->
+                        <div class="col-span-2 mt-2 border-t border-slate-700 pt-1 font-bold text-sky-500">STATISTICHE</div>
+                        <div class="col-span-2">
+                            Età: <span class="text-white">${Math.floor(c.age/60)}s</span> / ${Math.floor(c.maxAge/60)}s
+                            ${makeBar(c.age, c.maxAge, agePerc > 90 ? 'bg-red-600' : 'bg-purple-500')}
+                        </div>
+                        <div class="col-span-2 mt-1">
+                            Peso: <span class="text-white">${c.weight.toFixed(2)}</span>
+                            ${makeBar(c.weight, 20, 'bg-blue-500')}
+                        </div>
+                        <div class="col-span-2 mt-1">
+                            Stamina: <span class="text-white">${Math.floor(c.stamina)}/${c.maxStamina}</span>
+                            ${makeBar(c.stamina, c.maxStamina, c.stamina < 20 ? 'bg-red-500' : 'bg-yellow-500')}
+                        </div>
+                    </div>
+                `;
+                logContainer.innerHTML = c.history.map(h => `<li>${h}</li>`).join('');
+            } else {
+                container.innerHTML = `<div class="text-red-400 text-center">Creatura morta o persa.</div>`;
+                idSpan.innerText = "MORTA";
+            }
+        }
+    }
+
+    checkCollisions() {
+        for (let i = 0; i < this.creatures.length; i++) {
+            for (let j = i + 1; j < this.creatures.length; j++) {
+                let c1 = this.creatures[i];
+                let c2 = this.creatures[j];
+
+                let isHunting = (c1.genes.role === ROLES.PREDATORE && c2.genes.role === ROLES.PREDA) ||
+                                (c1.genes.role === ROLES.PREDA && c2.genes.role === ROLES.PREDATORE);
+
+                if (isHunting) continue; 
+
+                const spacing1 = c1.radius * 0.8;
+                const len1 = c1.radius + (c1.segments.length * spacing1);
+                const spacing2 = c2.radius * 0.8;
+                const len2 = c2.radius + (c2.segments.length * spacing2);
+                
+                const dxHead = c2.x - c1.x;
+                const dyHead = c2.y - c1.y;
+                const distHeadSq = dxHead*dxHead + dyHead*dyHead;
+                const maxDist = len1 + len2;
+
+                if (distHeadSq > maxDist * maxDist) continue; 
+
+                const getNodes = (c) => {
+                    let nodes = [{pt: c, r: c.radius}]; 
+                    let r = c.radius * 0.9; 
+                    c.segments.forEach(s => { 
+                        r *= 0.95; 
+                        nodes.push({pt: s, r: Math.max(1, r)}); 
+                    });
+                    return nodes;
+                };
+
+                const nodes1 = getNodes(c1);
+                const nodes2 = getNodes(c2);
+
+                for (let n1 of nodes1) {
+                    for (let n2 of nodes2) {
+                        const dx = n2.pt.x - n1.pt.x;
+                        const dy = n2.pt.y - n1.pt.y;
+                        const distSq = dx*dx + dy*dy;
+                        const minDist = n1.r + n2.r;
+
+                        if (distSq < minDist * minDist && distSq > 0.001) {
+                            const dist = Math.sqrt(distSq);
+                            const overlap = minDist - dist;
+                            
+                            const force = 0.2; 
+                            const nx = dx / dist;
+                            const ny = dy / dist;
+                            
+                            const moveX = nx * overlap * force;
+                            const moveY = ny * overlap * force;
+
+                            n1.pt.x -= moveX;
+                            n1.pt.y -= moveY;
+                            n2.pt.x += moveX;
+                            n2.pt.y += moveY;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    loop() {
+        this.ctx.fillStyle = '#0f172a'; 
+        this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+
+        if (!this.paused) {
+            this.time++;
+            
+            if (this.food.length < CONFIG.maxFood && Math.random() < CONFIG.foodRate) {
+                this.food.push(new Food(this.canvas.width, this.canvas.height));
+            }
+            this.food.forEach(f => f.update(this.canvas));
+
+            this.checkCollisions();
+
+            for (let i = this.creatures.length - 1; i >= 0; i--) {
+                let c = this.creatures[i];
+                let status = c.update(this.food, this.creatures, this.canvas);
+
+                if (status === "OLD_AGE") {
+                    this.addGlobalLog(`Morto #${c.id} (Vecchiaia - ${Math.floor(c.age/60)}s)`, "text-purple-400");
+                    this.creatures.splice(i, 1);
+                    continue; 
+                }
+
+                if (c.genes.role === ROLES.PREDA) {
+                    for (let j = this.food.length - 1; j >= 0; j--) {
+                        let f = this.food[j];
+                        if (utils.dist(c.x, c.y, f.x, f.y) < c.radius + f.size) {
+                            c.eat(f.energy); 
+                            this.food.splice(j, 1);
+                        }
+                    }
+                } else {
+                    for (let j = this.creatures.length - 1; j >= 0; j--) {
+                        if (i === j) continue; 
+                        let other = this.creatures[j];
+                        if (other.genes.role === ROLES.PREDA && utils.dist(c.x, c.y, other.x, other.y) < c.radius + other.radius * 0.5) {
+                             if (c.weight > other.weight * 0.85) {
+                                 c.eatPrey(other);
+                                 this.addGlobalLog(`Morto #${other.id} (Predato da #${c.id})`, "text-red-400");
+                                 this.creatures.splice(j, 1);
+                                 if (j < i) i--; 
+                             }
+                        }
+                    }
+                }
+
+                if (c.weight < 1.0) { 
+                    this.addGlobalLog(`Morto #${c.id} (Fame)`, "text-slate-500");
+                    this.creatures.splice(i, 1);
+                }
+            }
+            
+            if (this.creatures.length < CONFIG.targetPop) {
+                let spawnChance = 0.02 + (0.05 * (1 - (this.creatures.length / CONFIG.targetPop)));
+                
+                if (Math.random() < spawnChance) {
+                    const preds = this.creatures.filter(c => c.genes.role === ROLES.PREDATORE).length;
+                    const preys = this.creatures.length - preds;
+                    let forcedRole = null; 
+                    const ratio = preys > 0 ? (preds / preys) : 999;
+
+                    if (ratio >= CONFIG.maxPredatorRatio) {
+                        forcedRole = ROLES.PREDA;
+                    } else {
+                        if (preds < (this.creatures.length * CONFIG.predatorRatio)) {
+                            forcedRole = ROLES.PREDATORE;
+                        } else {
+                            forcedRole = ROLES.PREDA;
+                        }
+                    }
+                    this.addCreature(forcedRole, "Migrazione");
+                }
+            }
+        }
+
+        this.food.forEach(f => f.draw(this.ctx));
+        this.creatures.forEach(c => {
+            c.draw(this.ctx, c.id === this.selectedID);
+        });
+
+        requestAnimationFrame(this.loop);
+    }
+}
+
+window.onload = () => {
+    const game = new Game();
+};
+
+</script>
+</body>
+</html>
